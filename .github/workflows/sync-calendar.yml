@@ -1,0 +1,45 @@
+name: Sync GroupMe Calendar
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync GroupMe events to ICS
+        env:
+          GROUP_ID: ${{ secrets.GROUP_ID }}
+          GROUPME_TOKEN: ${{ secrets.GROUPME_TOKEN }}
+          ICS_OUTPUT_PATH: calendar.ics
+          DEFAULT_TZ: UTC
+        run: python scripts/groupme_to_ics.py --verbose
+
+      - name: Commit changes if needed
+        run: |
+          if git diff --quiet -- calendar.ics; then
+            echo "No ICS changes"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add calendar.ics
+          git commit -m "chore(calendar): sync GroupMe events"
+          git push
