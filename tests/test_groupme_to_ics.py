@@ -54,6 +54,50 @@ class GroupMeToICSTests(unittest.TestCase):
         self.assertEqual(len(deduped), 1)
         self.assertEqual(deduped[0].title, "New")
 
+    def test_dedupe_and_sort_tombstone_suppresses_older_active_event(self):
+        active_raw = {
+            "id": "dup",
+            "name": "Still Here",
+            "start_at": "2026-02-14T09:00:00Z",
+            "updated_at": "2026-02-14T09:00:00Z",
+        }
+        deleted_raw = {
+            "id": "dup",
+            "name": "Still Here",
+            "start_at": "2026-02-14T09:00:00Z",
+            "updated_at": "2026-02-14T09:05:00Z",
+            "deleted": True,
+        }
+        active_event = MODULE.normalize_event(active_raw, "UTC")
+        deleted_event = MODULE.normalize_event(deleted_raw, "UTC")
+        assert active_event and deleted_event
+        deduped = MODULE.dedupe_and_sort([active_event, deleted_event])
+        self.assertEqual(deduped, [])
+
+    def test_is_deleted_event_with_boolean_flag(self):
+        self.assertTrue(MODULE.is_deleted_event({"id": "1", "deleted": True}))
+
+    def test_normalize_event_marks_deleted_event(self):
+        raw = {
+            "id": "abc",
+            "name": "Practice",
+            "start_at": "2026-02-14T10:00:00Z",
+            "deleted": True,
+        }
+        event = MODULE.normalize_event(raw, "UTC")
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertTrue(event.deleted)
+
+    def test_is_deleted_event_with_status_value(self):
+        self.assertTrue(MODULE.is_deleted_event({"id": "1", "status": "cancelled"}))
+
+    def test_is_deleted_event_with_deleted_timestamp(self):
+        self.assertTrue(MODULE.is_deleted_event({"id": "1", "deleted_at": "2026-02-14T09:00:00Z"}))
+
+    def test_is_deleted_event_false_for_active_event(self):
+        self.assertFalse(MODULE.is_deleted_event({"id": "1", "name": "Active"}))
+
     def test_build_ics_contains_required_blocks(self):
         raw = {
             "id": "evt1",
