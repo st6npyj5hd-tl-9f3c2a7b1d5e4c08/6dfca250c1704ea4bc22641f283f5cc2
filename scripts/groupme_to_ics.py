@@ -26,6 +26,7 @@ EVENTS_PATH_TEMPLATE = "/conversations/{group_id}/events/list"
 @dataclass(frozen=True)
 class NormalizedEvent:
     event_id: str
+    deleted: bool
     title: str
     description: str
     location: str
@@ -183,8 +184,46 @@ def coalesce(*values: Any) -> Any:
     return None
 
 
+def as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"1", "true", "t", "yes", "y", "on"}
+    return False
+
+
+def is_deleted_event(raw: dict[str, Any]) -> bool:
+    flag_fields = (
+        "deleted",
+        "is_deleted",
+        "deleted_event",
+        "removed",
+        "is_removed",
+        "canceled",
+        "cancelled",
+        "is_canceled",
+        "is_cancelled",
+    )
+    for field in flag_fields:
+        if as_bool(raw.get(field)):
+            return True
+
+    if coalesce(raw.get("deleted_at"), raw.get("removed_at"), raw.get("cancelled_at"), raw.get("canceled_at")) is not None:
+        return True
+
+    status = coalesce(raw.get("status"), raw.get("state"))
+    if isinstance(status, str) and status.strip().lower() in {"deleted", "removed", "canceled", "cancelled"}:
+        return True
+
+    return False
+
+
 def normalize_event(raw: dict[str, Any], default_tz: str) -> NormalizedEvent | None:
     event_id = str(coalesce(raw.get("id"), raw.get("event_id"), raw.get("eventId"), "")).strip()
+    deleted = is_deleted_event(raw)
     title = str(coalesce(raw.get("name"), raw.get("title"), raw.get("subject"), "Untitled event")).strip()
     description = str(coalesce(raw.get("description"), raw.get("details"), "")).strip()
 
@@ -226,6 +265,7 @@ def normalize_event(raw: dict[str, Any], default_tz: str) -> NormalizedEvent | N
 
     return NormalizedEvent(
         event_id=event_id,
+        deleted=deleted,
         title=title,
         description=description,
         location=location,
@@ -312,7 +352,8 @@ def dedupe_and_sort(events: list[NormalizedEvent]) -> list[NormalizedEvent]:
     deduped: dict[str, NormalizedEvent] = {}
     for event in events:
         deduped[event.event_id] = event
-    return sorted(deduped.values(), key=lambda e: (e.start, e.event_id))
+    active_events = [event for event in deduped.values() if not event.deleted]
+    return sorted(active_events, key=lambda e: (e.start, e.event_id))
 
 
 def main() -> int:
