@@ -132,6 +132,93 @@ class GroupMeToICSTests(unittest.TestCase):
         assert dt is not None
         self.assertEqual(dt.tzinfo, timezone.utc)
 
+    def test_describe_changes_added_deleted_updated(self):
+        previous = {
+            "groupme-g-1@scll-calendar": MODULE.CalendarEntry(
+                uid="groupme-g-1@scll-calendar",
+                title="Old Event",
+                description="",
+                location="",
+                start=MODULE.parse_timestamp("2026-02-14T10:00:00Z", "UTC"),
+                end=MODULE.parse_timestamp("2026-02-14T11:00:00Z", "UTC"),
+                tzid="UTC",
+            ),
+            "groupme-g-2@scll-calendar": MODULE.CalendarEntry(
+                uid="groupme-g-2@scll-calendar",
+                title="Stay Event",
+                description="old",
+                location="",
+                start=MODULE.parse_timestamp("2026-02-14T12:00:00Z", "UTC"),
+                end=MODULE.parse_timestamp("2026-02-14T13:00:00Z", "UTC"),
+                tzid="UTC",
+            ),
+        }
+        current = {
+            "groupme-g-2@scll-calendar": MODULE.CalendarEntry(
+                uid="groupme-g-2@scll-calendar",
+                title="Stay Event",
+                description="new",
+                location="",
+                start=MODULE.parse_timestamp("2026-02-14T12:00:00Z", "UTC"),
+                end=MODULE.parse_timestamp("2026-02-14T13:00:00Z", "UTC"),
+                tzid="UTC",
+            ),
+            "groupme-g-3@scll-calendar": MODULE.CalendarEntry(
+                uid="groupme-g-3@scll-calendar",
+                title="Added Event",
+                description="",
+                location="",
+                start=MODULE.parse_timestamp("2026-02-14T14:00:00Z", "UTC"),
+                end=MODULE.parse_timestamp("2026-02-14T15:00:00Z", "UTC"),
+                tzid="UTC",
+            ),
+        }
+        changes = MODULE.describe_changes(previous, current)
+        self.assertTrue(any(line.startswith('Added "Added Event"') for line in changes))
+        self.assertTrue(any(line.startswith('Deleted "Old Event"') for line in changes))
+        self.assertTrue(any(line.startswith('Updated "Stay Event"') for line in changes))
+
+    def test_parse_ics_entries_round_trip(self):
+        raw = {
+            "id": "evt1",
+            "name": "Game Night",
+            "description": "Bring snacks",
+            "location": "Main Gym",
+            "start_at": "2026-02-14T18:00:00Z",
+            "end_at": "2026-02-14T19:00:00Z",
+            "updated_at": "2026-02-14T17:00:00Z",
+        }
+        event = MODULE.normalize_event(raw, "UTC")
+        assert event is not None
+        ics = MODULE.build_ics([event], "group123")
+        parsed = MODULE.parse_ics_entries(ics)
+        uid = "groupme-group123-evt1@scll-calendar"
+        self.assertIn(uid, parsed)
+        self.assertEqual(parsed[uid].title, "Game Night")
+
+    def test_changelog_changes_only_when_calendar_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "calendar.ics"
+            changelog = Path(tmp) / "calendar.changelog.txt"
+
+            cal1 = "BEGIN:VCALENDAR\nEND:VCALENDAR\n"
+            cal2 = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:x\nDTSTART;TZID=UTC:20260214T100000\nDTEND;TZID=UTC:20260214T110000\nSUMMARY:Event\nEND:VEVENT\nEND:VCALENDAR\n"
+
+            first = MODULE.write_if_changed(cal1, output)
+            self.assertTrue(first)
+            if first:
+                MODULE.write_if_changed("initial\n", changelog)
+
+            second = MODULE.write_if_changed(cal1, output)
+            self.assertFalse(second)
+
+            third = MODULE.write_if_changed(cal2, output)
+            self.assertTrue(third)
+            if third:
+                MODULE.write_if_changed("changed\n", changelog)
+
+            self.assertEqual(changelog.read_text(encoding="utf-8"), "changed\n")
+
 
 if __name__ == "__main__":
     unittest.main()
