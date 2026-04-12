@@ -37,6 +37,17 @@ class NormalizedEvent:
     url: str
 
 
+@dataclass(frozen=True)
+class CalendarEntry:
+    uid: str
+    title: str
+    description: str
+    location: str
+    start: datetime
+    end: datetime
+    tzid: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync GroupMe events to an ICS file")
     parser.add_argument("--output", help="ICS output path")
@@ -154,7 +165,10 @@ def parse_timestamp(value: Any, default_tz: str) -> datetime | None:
         try:
             dt = datetime.fromisoformat(iso_candidate)
         except ValueError:
-            return None
+            try:
+                dt = datetime.strptime(candidate, "%Y%m%dT%H%M%S")
+            except ValueError:
+                return None
 
         if dt.tzinfo is None:
             return localize_naive(dt, default_tz)
@@ -335,6 +349,110 @@ def build_ics(events: list[NormalizedEvent], group_id: str) -> str:
     return "\r\n".join(fold_ics_line(line) for line in lines) + "\r\n"
 
 
+def build_uid(group_id: str, event_id: str) -> str:
+    return f"groupme-{group_id}-{event_id}@scll-calendar"
+
+
+def build_calendar_entries(events: list[NormalizedEvent], group_id: str) -> dict[str, CalendarEntry]:
+    entries: dict[str, CalendarEntry] = {}
+    for event in events:
+        uid = build_uid(group_id, event.event_id)
+        entries[uid] = CalendarEntry(
+            uid=uid,
+            title=event.title,
+            description=event.description,
+            location=event.location,
+            start=event.start,
+            end=event.end,
+            tzid=event.tzid,
+        )
+    return entries
+
+
+def parse_ics_entries(content: str) -> dict[str, CalendarEntry]:
+    entries: dict[str, CalendarEntry] = {}
+    current: dict[str, str] = {}
+    in_event = False
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line == "BEGIN:VEVENT":
+            in_event = True
+            current = {}
+            continue
+        if line == "END:VEVENT":
+            in_event = False
+            uid = current.get("UID", "")
+            start = parse_timestamp(current.get("DTSTART", ""), current.get("DTSTART_TZID", "UTC"))
+            end = parse_timestamp(current.get("DTEND", ""), current.get("DTEND_TZID", "UTC"))
+            if uid and start and end:
+                entries[uid] = CalendarEntry(
+                    uid=uid,
+                    title=current.get("SUMMARY", ""),
+                    description=current.get("DESCRIPTION", ""),
+                    location=current.get("LOCATION", ""),
+                    start=start,
+                    end=end,
+                    tzid=current.get("DTSTART_TZID", "UTC") or "UTC",
+                )
+            current = {}
+            continue
+
+        if not in_event or ":" not in line:
+            continue
+
+        key_part, value = line.split(":", 1)
+        if key_part.startswith("DTSTART"):
+            current["DTSTART"] = value
+            if "TZID=" in key_part:
+                current["DTSTART_TZID"] = key_part.split("TZID=", 1)[1]
+        elif key_part.startswith("DTEND"):
+            current["DTEND"] = value
+            if "TZID=" in key_part:
+                current["DTEND_TZID"] = key_part.split("TZID=", 1)[1]
+        else:
+            current[key_part] = value
+
+    return entries
+
+
+def format_change_time(value: datetime, tzid: str) -> str:
+    local = value.astimezone(resolve_zone(tzid))
+    return local.strftime("%b %d at %I:%M %p")
+
+
+def describe_changes(previous: dict[str, CalendarEntry], current: dict[str, CalendarEntry]) -> list[str]:
+    lines: list[str] = []
+
+    for uid in sorted(current.keys() - previous.keys()):
+        event = current[uid]
+        lines.append(f'Added "{event.title}" on {format_change_time(event.start, event.tzid)}.')
+
+    for uid in sorted(previous.keys() - current.keys()):
+        event = previous[uid]
+        lines.append(f'Deleted "{event.title}" on {format_change_time(event.start, event.tzid)}.')
+
+    for uid in sorted(previous.keys() & current.keys()):
+        old = previous[uid]
+        new = current[uid]
+        if (
+            old.title != new.title
+            or old.start != new.start
+            or old.end != new.end
+            or old.description != new.description
+            or old.location != new.location
+        ):
+            lines.append(f'Updated "{new.title}" on {format_change_time(new.start, new.tzid)}.')
+
+    return lines
+
+
+def build_changelog_content(changes: list[str]) -> str:
+    if not changes:
+        return "Calendar changed, but no human-readable event deltas were detected.\n"
+    return "\n".join(changes) + "\n"
+
+
 def write_if_changed(content: str, output_path: Path) -> bool:
     if output_path.exists() and output_path.read_text(encoding="utf-8") == content:
         return False
@@ -397,9 +515,19 @@ def main() -> int:
         logging.info("Dry-run complete: %d events parsed, %d events emitted", len(normalized), len(ordered))
         return 0
 
+    previous_ics = ""
+    if output_path.exists():
+        previous_ics = output_path.read_text(encoding="utf-8")
+
     changed = write_if_changed(ics_content, output_path)
     if changed:
         logging.info("Wrote %s with %d events", output_path, len(ordered))
+        changelog_path = output_path.with_name(f"{output_path.stem}.changelog.txt")
+        previous_entries = parse_ics_entries(previous_ics) if previous_ics else {}
+        current_entries = build_calendar_entries(ordered, group_id)
+        changelog = build_changelog_content(describe_changes(previous_entries, current_entries))
+        write_if_changed(changelog, changelog_path)
+        logging.info("Wrote %s", changelog_path)
     else:
         logging.info("No changes for %s (%d events)", output_path, len(ordered))
     return 0
